@@ -1,0 +1,24 @@
+syntax = "proto3";
+package work;
+
+service Coordinator {
+    rpc get_work (GetWorkRequest) returns (GetWorkReply);
+    rpc complete_work (CompleteWorkRequest) returns (CompleteWorkReply);
+}
+
+message GetWorkRequest {
+    string id = 1;
+}
+
+message GetWorkReply {
+    string work_type = 1;
+    repeated string files = 2;
+    uint32 partition = 3;
+}
+
+message CompleteWorkReply {}
+
+message CompleteWorkRequest {
+    string work_type = 1;
+    map<string, string> files = 2;
+}
