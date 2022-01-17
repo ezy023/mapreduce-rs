@@ -20,5 +20,6 @@ message CompleteWorkReply {}
 
 message CompleteWorkRequest {
     string work_type = 1;
-    map<string, string> files = 2;
+    string original_file = 2;
+    map<string, string> files = 3;
 }

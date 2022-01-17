@@ -1,7 +1,7 @@
 use std::hash::{Hash, Hasher};
 use std::io::{self, Read, Write, BufReader, BufRead, BufWriter};
 use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::collections::{
     hash_map::DefaultHasher,
     HashMap,
@@ -40,17 +40,26 @@ where
     }
 
     pub async fn work_loop(self) {
-        let mut client = CoordinatorClient::connect(self.coordinator_address.clone()).await.unwrap();
+        /* retry connection until one is established, this should be limited to a set of retries */
+        let mut client =
+            loop {
+                if let Ok(client) = CoordinatorClient::connect(self.coordinator_address.clone()).await {
+                    break client;
+                }
+        };
+
         loop {
             let request = tonic::Request::new(GetWorkRequest{id: self.id.clone()});
             if let Ok(mut response) = client.get_work(request).await {
-                let mut response = response.get_mut();
+                let response = response.get_mut();
                 match response.work_type.as_str() {
                     "map" => {
-                        match self.map(response.files.pop().unwrap()) {
+                        let filename = response.files.pop().unwrap();
+                        match self.map(filename.clone()) {
                             Ok(mapped_paths) => {
                                 let complete_request = tonic::Request::new(CompleteWorkRequest{
                                     work_type: String::from("map"),
+                                    original_file: filename,
                                     files: mapped_paths,
                                 });
                                 println!("Completing MAP work");
@@ -67,12 +76,14 @@ where
                         let files = response.files.iter()
                             .map(|f| Box::new(f.into()))
                             .collect();
+                        dbg!(&files);
                         match self.reduce(response.partition, files) {
                             Ok(reduce_output_file) => {
                                 let mut reduced = HashMap::new();
                                 reduced.insert(response.partition.to_string(), reduce_output_file);
                                 let complete_request = tonic::Request::new(CompleteWorkRequest{
                                     work_type: String::from("reduce"),
+                                    original_file: String::new(), // TODO this is a hack for tracking the map file status
                                     files: reduced,
                                 });
                                 if let Err(e) = client.complete_work(complete_request).await {
@@ -89,6 +100,8 @@ where
                     },
                     _ => panic!("Unexpected work type {}", response.work_type),
                 }
+            } else {
+                println!("received error, looping");
             }
         }
     }
@@ -121,7 +134,7 @@ where
     // filepath is more of a documentId
     fn map_contents(&self, filepath: &String, contents: String) -> HashMap<u64, Vec<(String, String)>> {
         let mut map = HashMap::<u64, Vec<(String, String)>>::new();
-        for token in contents.split(self.field_split_func) {
+        for token in contents.split(self.field_split_func).filter(|s| !s.is_empty()) { // 'filter' removes empty strings that result from contiguous separators, see 'split' docs
             let string_token = String::from(token);
             let partition = Self::hash(&string_token) % self.partitions as u64;
             let (tok, val) = (self.map_func)(filepath.clone(), string_token);
@@ -139,7 +152,7 @@ where
         let mut aggregation : HashMap<String, Vec<String>> = HashMap::new();
         for filepath in filepaths.iter() {
             let file = File::open(filepath.as_ref())?;
-            let mut reader = BufReader::new(file);
+            let reader = BufReader::new(file);
             for line in reader.lines() {
                 let line = line.unwrap();
                 let parts : Vec<&str> = line.split(',').collect();
@@ -164,7 +177,7 @@ where
         let output_file = File::create(&output_filepath)?;
         let mut writer = BufWriter::new(output_file);
         for (key, val) in results.iter() {
-            if let Err(e) = write!(writer, "{},{}\n", key, val) {
+            if let Err(e) = write!(writer, "{} {}\n", key, val) {
                 println!("Error writing {},{}. {:?}", key, val, e);
             }
         }
@@ -178,6 +191,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn test_map_contents() {
@@ -276,9 +290,10 @@ three,1
         let mut output_file = File::open(output_filepath).unwrap();
         let mut output_contents = String::new();
         output_file.read_to_string(&mut output_contents)?;
+        dbg!(&output_contents);
         output_contents.trim().split('\n')
             .map(|line| {
-                let entry_vec: Vec<&str> = line.split(',').collect();
+                let entry_vec: Vec<&str> = line.split_whitespace().collect();
                 (String::from(entry_vec[0]), entry_vec[1].parse::<i32>().unwrap())
             })
             .for_each(|(key, count)| {
