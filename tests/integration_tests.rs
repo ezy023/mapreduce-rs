@@ -104,7 +104,8 @@ mod tests {
 
             let state = State::new(1, files);
             let coordinate = Coordinate::new(state);
-            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8888);
+            // This port needs to be different than the port used in the concurrent test or else client connections in one of the test will fail
+            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7777);
 
             Server::builder()
                 .add_service(CoordinatorServer::new(coordinate))
@@ -126,7 +127,7 @@ mod tests {
             partitions: 1,
             field_split_func: {|c| !c.is_alphabetic() },
             partition_output_root: Path::new("/tmp/sequential-mr").to_owned(),
-            coordinator_address: String::from("http://127.0.0.1:8888"),
+            coordinator_address: String::from("http://127.0.0.1:7777"),
         };
 
         runtime.block_on(worker_two.work_loop());

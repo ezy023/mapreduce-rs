@@ -2,6 +2,7 @@ pub mod client;
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tonic::{Code, Request, Response, Status};
 pub use crate::coordinator_server::{Coordinator, CoordinatorServer};
 
@@ -17,7 +18,7 @@ enum ReduceStatus {
 #[derive(Debug, PartialEq)]
 enum MapStatus {
     Ready,
-    Scheduled,
+    Scheduled(Instant),
     Done,
 }
 
@@ -32,6 +33,7 @@ pub struct State {
     files: HashMap<String, MapStatus>,
     partitions: Vec<Partition>,
     output: Vec<String>,
+    timeout: Duration, // defaults to 5 minutes
 }
 
 impl State {
@@ -44,14 +46,31 @@ impl State {
         for file in files.iter() {
             filemap.insert(file.to_owned(), MapStatus::Ready);
         }
-        State{files: filemap, partitions, output: Vec::new()}
+        State{
+            files: filemap,
+            partitions,
+            output: Vec::new(),
+            timeout: Duration::from_secs(300)
+        }
+
     }
 
-    pub fn get_file_to_map(&mut self) -> Option<String> {
+    pub fn get_file_to_map(&mut self, inst: Instant) -> Option<String> {
+        // TODO check if instant is after timeout
         for (key, val) in self.files.iter_mut() {
-            if *val == MapStatus::Ready {
-                *val = MapStatus::Scheduled;
-                return Some(key.clone());
+            match *val {
+                MapStatus::Ready => {
+                    let scheduled_time = Instant::now();
+                    *val = MapStatus::Scheduled(scheduled_time);
+                    return Some(key.clone());
+                },
+                MapStatus::Scheduled(t) => {
+                    if inst.duration_since(t) > self.timeout {
+                        *val = MapStatus::Scheduled(Instant::now());
+                        return Some(key.clone());
+                    }
+                },
+                _ => {},
             }
         }
         None
@@ -99,16 +118,47 @@ pub mod state_tests {
     use crate::*;
 
     #[test]
-    pub fn test_get_file_to_map() {
+    pub fn test_get_file_to_map_ready() {
         let mut filemap = HashMap::new();
         filemap.insert(String::from("file_0"), MapStatus::Ready);
         let mut state = State{
             files: filemap,
             partitions: vec![], // this test does not require valid state for parition or output
             output: vec![],
+            timeout: Duration::from_secs(5),
         };
 
-        assert_eq!(Some(String::from("file_0")), state.get_file_to_map());
+        assert_eq!(Some(String::from("file_0")), state.get_file_to_map(Instant::now()));
+    }
+
+    #[test]
+    pub fn test_get_file_to_map_scheduled() {
+        let mut filemap = HashMap::new();
+        filemap.insert(String::from("file_0"), MapStatus::Scheduled(Instant::now()));
+        let mut state = State{
+            files: filemap,
+            partitions: vec![], // this test does not require valid state for parition or output
+            output: vec![],
+            timeout: Duration::from_secs(5),
+        };
+
+        assert_eq!(None, state.get_file_to_map(Instant::now())); // the use of Instant here seems fragile in a test
+    }
+
+    #[test]
+    pub fn test_get_file_to_map_schedule_timeout() {
+        let mut filemap = HashMap::new();
+        let scheduled_inst = Instant::now();
+        filemap.insert(String::from("file_0"), MapStatus::Scheduled(scheduled_inst));
+        let mut state = State{
+            files: filemap,
+            partitions: vec![],
+            output: vec![],
+            timeout: Duration::from_secs(5),
+        };
+
+        let future = Instant::now().checked_add(Duration::from_secs(6)).unwrap();
+        assert_eq!(Some(String::from("file_0")), state.get_file_to_map(future));
     }
 
     #[test]
@@ -120,11 +170,12 @@ pub mod state_tests {
             files: filemap,
             partitions: vec![], // this test does not require valid state for parition or output
             output: vec![],
+            timeout: Duration::from_secs(5),
         };
 
         assert!(!state.is_done_mapping()); // not done mapping
 
-        *state.files.get_mut("file_0").unwrap() = MapStatus::Scheduled;
+        *state.files.get_mut("file_0").unwrap() = MapStatus::Scheduled(Instant::now());
         assert!(!state.is_done_mapping()); // not done mapping
 
         *state.files.get_mut("file_0").unwrap() = MapStatus::Done;
@@ -182,7 +233,7 @@ impl Coordinator for Coordinate {
             let reply = GetWorkReply{work_type: String::from("done"), files: vec![], partition: u32::MAX};
             return Ok(Response::new(reply));
         } else {
-            match state_guard.get_file_to_map() {
+            match state_guard.get_file_to_map(Instant::now()) {
                 Some(file) => {
                     let files = vec![file];
                     let reply = GetWorkReply{work_type: String::from("map"), files, partition: u32::MAX};
@@ -256,11 +307,12 @@ mod coordinator_tests {
     #[tokio::test]
     async fn test_get_work_wait_on_map_to_finish() -> TestResult {
         let mut files = HashMap::new();
-        files.insert(String::from("file-one"), MapStatus::Scheduled);
+        files.insert(String::from("file-one"), MapStatus::Scheduled(Instant::now()));
         let state = State{
             files: files,
             partitions: vec![],
             output: vec![],
+            timeout: Duration::from_secs(5),
         };
         let coordinate = Coordinate::new(state);
 
@@ -297,7 +349,7 @@ mod coordinator_tests {
 
     #[tokio::test]
     async fn test_complete_work_map() -> TestResult {
-        let files = vec![String::from("file-one"), String::from("file_two")];
+        let files = vec![String::from("file-one"), String::from("file-two")];
         let state = State::new(2, files);
         let coordinate = Coordinate::new(state);
 
@@ -305,6 +357,7 @@ mod coordinator_tests {
         mapped_file_one.insert("0".to_owned(), "file-one_0".to_owned());
         mapped_file_one.insert("1".to_owned(), "file-one_1".to_owned());
         let complete_work_request_one = Request::new(CompleteWorkRequest {
+            original_file: String::from("file-one"),
             work_type: String::from("map"),
             files: mapped_file_one,
         });
@@ -329,6 +382,7 @@ mod coordinator_tests {
         mapped_file_two.insert("0".to_owned(), "file-two_0".to_owned());
         mapped_file_two.insert("1".to_owned(), "file-two_1".to_owned());
         let complete_work_request_one = Request::new(CompleteWorkRequest {
+            original_file: String::from("file-two"),
             work_type: String::from("map"),
             files: mapped_file_two,
         });
