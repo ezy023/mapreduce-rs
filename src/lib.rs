@@ -93,7 +93,7 @@ impl State {
         for pair in files.iter().take_while(|_| true) {
             // dbg!(&self.partitions);
             match self.partitions.get_mut(pair.0 as usize) {
-                Some(mut partition) => {
+                Some(partition) => {
                     partition.files.push(pair.1.clone());
                 },
                 None => {
@@ -220,8 +220,8 @@ impl Coordinate {
 
 #[tonic::async_trait]
 impl Coordinator for Coordinate {
-    async fn get_work(&self, request: Request<GetWorkRequest>) -> Result<Response<GetWorkReply>, Status> {
-        let mut state_guard = &mut self.state_guard.lock().unwrap();
+    async fn get_work(&self, _request: Request<GetWorkRequest>) -> Result<Response<GetWorkReply>, Status> {
+        let state_guard = &mut self.state_guard.lock().unwrap();
         if state_guard.is_done_mapping() {
             for part in state_guard.partitions.iter_mut() {
                 if part.status == ReduceStatus::Ready {
@@ -240,7 +240,6 @@ impl Coordinator for Coordinate {
                     return Ok(Response::new(reply));
                 },
                 None => {
-                    println!("None received when retrieving next file to map");
                     return Err(Status::not_found("Unable to retrieve a file to be mapped"))
                 }
             };
@@ -248,8 +247,7 @@ impl Coordinator for Coordinate {
     }
 
     async fn complete_work(&self, request: Request<CompleteWorkRequest>) -> Result<Response<CompleteWorkReply>, Status> {
-        println!("Got complete work request");
-        let mut state = &mut self.state_guard.lock().unwrap();
+        let state = &mut self.state_guard.lock().unwrap();
         let work_type = &request.get_ref().work_type;
         match work_type.as_str() {
             "map" => {

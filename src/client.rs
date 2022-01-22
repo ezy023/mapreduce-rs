@@ -50,65 +50,67 @@ where
 
         loop {
             let request = tonic::Request::new(GetWorkRequest{id: self.id.clone()});
-            if let Ok(mut response) = client.get_work(request).await {
-                let response = response.get_mut();
-                match response.work_type.as_str() {
-                    "map" => {
-                        let filename = response.files.pop().unwrap();
-                        match self.map(filename.clone()) {
-                            Ok(mapped_paths) => {
-                                let complete_request = tonic::Request::new(CompleteWorkRequest{
-                                    work_type: String::from("map"),
-                                    original_file: filename,
-                                    files: mapped_paths,
-                                });
-                                println!("Completing MAP work");
-                                // TODO need to handle retries and failure of the server to ack the completion
-                                if let Err(e) = client.complete_work(complete_request).await {
-                                    println!("ERROR complete map {:?}", e);
-                                }
-                            },
-                            Err(e) => println!("ERROR {:?}", e),
-                        }
-                    },
-                    "reduce" => {
-                        println!("REDUCING");
-                        let files = response.files.iter()
-                            .map(|f| Box::new(f.into()))
-                            .collect();
-                        dbg!(&files);
-                        match self.reduce(response.partition, files) {
-                            Ok(reduce_output_file) => {
-                                let mut reduced = HashMap::new();
-                                reduced.insert(response.partition.to_string(), reduce_output_file);
-                                let complete_request = tonic::Request::new(CompleteWorkRequest{
-                                    work_type: String::from("reduce"),
-                                    original_file: String::new(), // TODO this is a hack for tracking the map file status
-                                    files: reduced,
-                                });
-                                if let Err(e) = client.complete_work(complete_request).await {
-                                    println!("ERROR complete reduce {:?}", e);
-                                }
-                            },
-                            Err(e) => println!("REDUCE ERROR {:?}", e),
-                        }
-                    },
-                    // TODO loop HACK
-                    "done" => {
-                        println!("DONE");
-                        return;
-                    },
-                    _ => panic!("Unexpected work type {}", response.work_type),
-                }
-            } else {
-                println!("received error, looping");
+            match client.get_work(request).await {
+                Ok(mut response) => {
+                    let response = response.get_mut();
+                    match response.work_type.as_str() {
+                        "map" => {
+                            let filename = response.files.pop().unwrap();
+                            match self.map(PathBuf::from(filename.clone())) {
+                                Ok(mapped_paths) => {
+                                    let complete_request = tonic::Request::new(CompleteWorkRequest{
+                                        work_type: String::from("map"),
+                                        original_file: filename,
+                                        files: mapped_paths,
+                                    });
+                                    // TODO need to handle retries and failure of the server to ack the completion
+                                    if let Err(e) = client.complete_work(complete_request).await {
+                                        println!("ERROR complete map {:?}", e);
+                                    }
+                                },
+                                Err(e) => println!("ERROR {:?}", e),
+                            }
+                        },
+                        "reduce" => {
+                            let files = response.files.iter()
+                                .map(|f| Box::new(f.into()))
+                                .collect();
+                            dbg!(&files);
+                            match self.reduce(response.partition, files) {
+                                Ok(reduce_output_file) => {
+                                    let mut reduced = HashMap::new();
+                                    reduced.insert(response.partition.to_string(), reduce_output_file);
+                                    let complete_request = tonic::Request::new(CompleteWorkRequest{
+                                        work_type: String::from("reduce"),
+                                        original_file: String::new(), // TODO this is a hack for tracking the map file status
+                                        files: reduced,
+                                    });
+                                    if let Err(e) = client.complete_work(complete_request).await {
+                                        println!("ERROR complete reduce {:?}", e);
+                                    }
+                                },
+                                Err(e) => println!("REDUCE ERROR {:?}", e),
+                            }
+                        },
+                        // TODO loop HACK
+                        "done" => {
+                            println!("DONE");
+                            return;
+                        },
+                        _ => panic!("Unexpected work type {}", response.work_type),
+                    }
+                },
+                Err(_) => {
+                    // println!("received error {:?}", e)
+                },
             }
         }
     }
 
     // The results need to be returned so they can be partitioned and written out
-    fn map(&self, filepath: String) -> Result<HashMap<String, String>, io::Error> {
+    fn map(&self, filepath: PathBuf) -> Result<HashMap<String, String>, io::Error> {
         // open file, split values, group to map, pass to func
+        // TODO temp hack to fix integration test issue
         let mut file = File::open(&filepath)?;
         let mut contents = String::new();
         file.read_to_string(&mut contents)?;
@@ -117,11 +119,9 @@ where
         // write out partitions, need to send partition filepaths back to coordinator
         let mut output_files = HashMap::new();
         for (partition, values) in results.iter() {
-            let partition_file = self.partition_output_root.join(format!("{}_{}", filepath, partition));
+            let partition_file = self.partition_output_root.join(format!("{}_{}", filepath.file_name().unwrap().to_str().unwrap(), partition));
             let mut file = File::create(&partition_file)?;
-            // dbg!(&file);
             for (token, value) in values.iter() {
-                // println!("Writing {},{} to file {}", &token, &value, &partition);
                 write!(file, "{},{}\n", token, value)?;
             }
             output_files.insert(partition.to_string(), String::from(partition_file.to_str().unwrap()));
@@ -132,12 +132,12 @@ where
     }
 
     // filepath is more of a documentId
-    fn map_contents(&self, filepath: &String, contents: String) -> HashMap<u64, Vec<(String, String)>> {
+    fn map_contents(&self, filepath: &PathBuf, contents: String) -> HashMap<u64, Vec<(String, String)>> {
         let mut map = HashMap::<u64, Vec<(String, String)>>::new();
         for token in contents.split(self.field_split_func).filter(|s| !s.is_empty()) { // 'filter' removes empty strings that result from contiguous separators, see 'split' docs
             let string_token = String::from(token);
             let partition = Self::hash(&string_token) % self.partitions as u64;
-            let (tok, val) = (self.map_func)(filepath.clone(), string_token);
+            let (tok, val) = (self.map_func)(filepath.to_str().unwrap().to_owned(), string_token);
             if let Some(v) = map.get_mut(&partition) {
                 (*v).push((tok, val));
             } else {
@@ -156,6 +156,10 @@ where
             for line in reader.lines() {
                 let line = line.unwrap();
                 let parts : Vec<&str> = line.split(',').collect();
+                if parts.len() < 2 {
+                    println!("Invalid string '{}'", line);
+                    continue;
+                }
                 if let Some(val) = aggregation.get_mut(parts[0]) {
                     (*val).push(String::from(parts[1]));
                 } else {
@@ -206,7 +210,7 @@ mod tests {
         };
 
         let contents = String::from("words to test with");
-        let results = worker.map_contents(&String::from("/tmp"), contents);
+        let results = worker.map_contents(&PathBuf::from("/tmp"), contents);
         let expected = HashMap::from([
             (0, vec![
                 ("words".to_owned(), "1".to_owned()),
@@ -234,7 +238,7 @@ mod tests {
         let mut input = File::create(input_path.clone())?;
         write!(input, "one two two three three three");
 
-        let mut intermediate_results = worker.map(input_path.to_str().unwrap().to_owned())?;
+        let mut intermediate_results = worker.map(input_path)?;
 
         assert_eq!(1, intermediate_results.len());
 

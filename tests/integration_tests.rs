@@ -16,62 +16,6 @@ mod tests {
         client::Worker
     };
 
-    // #[test]
-    fn test_retrieve_files() {
-        let runtime = Builder::new_multi_thread()
-            .worker_threads(2)
-            .thread_name("mr-integration-test")
-            .thread_stack_size(3 * 1024 * 1024)
-            .enable_all()
-            .build()
-            .unwrap();
-
-
-
-        runtime.spawn(async {
-            let files = vec![String::from("file-two"),
-                             String::from("file-one")];
-            let state = State::new(1, files);
-            let coordinate = Coordinate::new(state);
-            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8888);
-
-            Server::builder()
-                .add_service(CoordinatorServer::new(coordinate))
-                .serve(addr)
-                .await
-        });
-
-        /* -------------------RPC CLIENT -------------------*/
-
-
-        runtime.block_on(async {
-            let mut client = CoordinatorClient::connect("http://localhost:8888").await.unwrap();
-
-            let request = tonic::Request::new(GetWorkRequest {
-                id: String::from("test-id"),
-            });
-
-
-            let response = client.get_work(request).await.unwrap();
-
-            println!("RESPONSE_ONE={:?}", response);
-
-            assert_eq!(response.get_ref().files.len(), 1);
-            assert_eq!(response.get_ref().files[0], "file-one");
-
-            let request_two = tonic::Request::new(GetWorkRequest {
-                id: String::from("test-id"),
-            });
-
-
-            let response_two = client.get_work(request_two).await.unwrap();
-            println!("RESPONSE_TWO={:?}", response);
-
-            assert_eq!(response_two.get_ref().files.len(), 1);
-            assert_eq!(response_two.get_ref().files[0], "file-two");
-        });
-    }
-
     #[test]
     fn test_map_reduce_sequential() -> Result<(), Box<dyn std::error::Error>> {
         let runtime = Builder::new_multi_thread()
@@ -83,7 +27,6 @@ mod tests {
             .unwrap();
 
         /* -------------------COORDINATOR -------------------*/
-
 
         runtime.spawn(async {
             let root_dir = std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
@@ -97,10 +40,6 @@ mod tests {
                 Path::new(&root_dir).join("tests/fixtures/pg-sherlock_holmes.txt").to_str().unwrap(),
                 Path::new(&root_dir).join("tests/fixtures/pg-tom_sawyer.txt").to_str().unwrap(),
             ].iter().map(|s| String::from(*s)).collect();
-            // let files = vec![
-            //     Path::new(&root_dir).join("tests/fixtures/short_two.txt").to_str().unwrap(),
-            //     Path::new(&root_dir).join("tests/fixtures/short_one.txt").to_str().unwrap(),
-            // ].iter().map(|s| String::from(*s)).collect();
 
             let state = State::new(1, files);
             let coordinate = Coordinate::new(state);
@@ -110,15 +49,15 @@ mod tests {
             Server::builder()
                 .add_service(CoordinatorServer::new(coordinate))
                 .serve(addr)
-                .await
+                .await;
         });
 
         /* -------------------WORKER -------------------*/
 
         let worker_two = Worker{
             id:"123".to_owned(),
-            map_func: { |key, value| (value, String::from("1")) },
-            reduce_func: { |key, values| {
+            map_func: { |_key, value| (value, String::from("1")) },
+            reduce_func: { |_key, values| {
                 // println!("Key: {}", key);
                 values.iter()
                     .map(|v| v.parse::<i32>().unwrap())
@@ -132,9 +71,13 @@ mod tests {
 
         runtime.block_on(worker_two.work_loop());
 
-        // TODO read in 'mr-correct-wc.txt' and use it for comparison or test output
-        // There should be two reduced output files because there are 2 partitions
-        compare_files(&Path::new("/tmp/sequential-mr"))
+        let dir_path = Path::new("/tmp/sequential-mr");
+        let result = compare_files(&dir_path);
+        if let Err(e) = clean_up_files(&dir_path) {
+            println!("Failed removing test files from {}. {:?}", dir_path.display(), e);
+        }
+
+        result
     }
 
     #[test]
@@ -181,14 +124,10 @@ mod tests {
 
         let worker_one = Worker{
             id:"123".to_owned(),
-            map_func: { |key, value| {
-                if value == "parting" {
-                    println!("SEEN \"parting\"");
-                }
+            map_func: { |_key, value| {
                 (value, String::from("1"))
             }},
-            reduce_func: { |key, values| {
-                // println!("Key: {}", key);
+            reduce_func: { |_key, values| {
                 values.iter()
                     .map(|v| v.parse::<i32>().unwrap())
                     .fold(0, |accum, item| accum + item)
@@ -203,14 +142,10 @@ mod tests {
 
         let worker_two = Worker{
             id:"123".to_owned(),
-            map_func: { |key, value| {
-                if value == "parting" {
-                    println!("SEEN \"parting\"");
-                }
+            map_func: { |_key, value| {
                 (value, String::from("1"))
             }},
-            reduce_func: { |key, values| {
-                // println!("Key: {}", key);
+            reduce_func: { |_key, values| {
                 values.iter()
                     .map(|v| v.parse::<i32>().unwrap())
                     .fold(0, |accum, item| accum + item)
@@ -225,7 +160,12 @@ mod tests {
 
 
         // There should be two reduced output files because there are 2 partitions
-        compare_files(&Path::new("/tmp/concurrent-mr"))
+        let dir_path = Path::new("/tmp/concurrent-mr");
+        let result = compare_files(&dir_path);
+        if let Err(e) = clean_up_files(&dir_path) {
+            println!("Failed removing test files from {}. {:?}", dir_path.display(), e);
+        }
+        result
     }
 
     fn compare_files(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -236,6 +176,20 @@ mod tests {
         // let got_path = File::open(Path::new(&root_dir).join("erik-reduce.txt"))?;
         let reduced_output = collect_reduce_files(path)?;
         compare_mr_files(BufReader::new(expected_path), reduced_output)
+    }
+
+    fn clean_up_files(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        for file in std::fs::read_dir(path).unwrap() {
+            let path = file?.path();
+            if path.is_file() {
+                if let Some(file_name) = path.file_name().unwrap().to_str() {
+                    if file_name.contains("reduce_output") {
+                        std::fs::remove_file(path)?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
 
@@ -301,7 +255,7 @@ mod tests {
             match expected_map.get(k) {
                 Some(expected_val) => {
                     if v != expected_val {
-                        println!("Key {}. expected: {}, got: {}", &k, &expected_val, &v);
+                        // println!("Key {}. expected: {}, got: {}", &k, &expected_val, &v);
                         count_differences_map.insert(k.clone(), (expected_val.clone(), v.clone()));
                     } else {
                         expected_copy.remove(k);
