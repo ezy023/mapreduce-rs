@@ -14,7 +14,8 @@ use crate::{GetWorkRequest, CompleteWorkRequest};
 pub struct Worker<M, R>
 where
     M: Fn(String, String) -> (String, String),
-    R: Fn(&String, &Vec<String>) -> i32,
+// TODO why do these take references?
+    R: Fn(&String, &Vec<String>) -> String,
 {
     pub id: String,
     // map_func takes a file path and returns a hashmap of results which the imple writes to disk?
@@ -31,7 +32,7 @@ where
 impl<M, R> Worker<M, R>
 where
     M: Fn(String, String) -> (String, String),
-    R: Fn(&String, &Vec<String>) -> i32,
+    R: Fn(&String, &Vec<String>) -> String,
 {
     fn hash(s: &String) -> u64 {
         let mut hasher = DefaultHasher::new();
@@ -41,6 +42,7 @@ where
 
     pub async fn work_loop(self) {
         /* retry connection until one is established, this should be limited to a set of retries */
+        // TODO limit retries, add backoff
         let mut client =
             loop {
                 if let Ok(client) = CoordinatorClient::connect(self.coordinator_address.clone()).await {
@@ -75,7 +77,6 @@ where
                             let files = response.files.iter()
                                 .map(|f| Box::new(f.into()))
                                 .collect();
-                            dbg!(&files);
                             match self.reduce(response.partition, files) {
                                 Ok(reduce_output_file) => {
                                     let mut reduced = HashMap::new();
@@ -169,10 +170,10 @@ where
         }
 
         // step 2. apply reduce function
-        let mut results : HashMap<String, i32> = HashMap::new();
+        let mut results : HashMap<String, String> = HashMap::new();
         for (key, vals) in aggregation.iter() {
             let result = (self.reduce_func)(key, vals);
-            results.insert(key.clone(), result);
+            results.insert(key.clone(), result.to_string());
         }
 
 
@@ -269,6 +270,7 @@ three,1
                 values.iter()
                     .map(|v| v.parse::<i32>().unwrap())
                     .fold(0, |accum, item| accum + item)
+                    .to_string()
             }
             }, // the function should receive input like 'key vec[1, 1, 1, 1]' or the like, it should receive the full set of value for the key
             partitions: 1,

@@ -54,6 +54,8 @@ mod tests {
 
         /* -------------------WORKER -------------------*/
 
+        let partition_root = Path::new("/tmp/sequential-mr");
+
         let worker_two = Worker{
             id:"123".to_owned(),
             map_func: { |_key, value| (value, String::from("1")) },
@@ -62,19 +64,21 @@ mod tests {
                 values.iter()
                     .map(|v| v.parse::<i32>().unwrap())
                     .fold(0, |accum, item| accum + item)
+                    .to_string()
             }},
             partitions: 1,
             field_split_func: {|c| !c.is_alphabetic() },
-            partition_output_root: Path::new("/tmp/sequential-mr").to_owned(),
+            partition_output_root: partition_root.to_path_buf(),
             coordinator_address: String::from("http://127.0.0.1:7777"),
         };
 
         runtime.block_on(worker_two.work_loop());
 
-        let dir_path = Path::new("/tmp/sequential-mr");
-        let result = compare_files(&dir_path);
-        if let Err(e) = clean_up_files(&dir_path) {
-            println!("Failed removing test files from {}. {:?}", dir_path.display(), e);
+        let root_dir = std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let expected_path = Path::new(&root_dir).join("tests/fixtures/mr-correct-wc.txt");
+        let result = compare_files(expected_path, partition_root, wc_entry_compare);
+        if let Err(e) = clean_up_files(&partition_root) {
+            println!("Failed removing test files from {}. {:?}", partition_root.display(), e);
         }
 
         result
@@ -92,7 +96,6 @@ mod tests {
 
         /* -------------------COORDINATOR -------------------*/
 
-
         runtime.spawn(async {
             let root_dir = std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
             let files = vec![
@@ -105,10 +108,6 @@ mod tests {
                 Path::new(&root_dir).join("tests/fixtures/pg-sherlock_holmes.txt").to_str().unwrap(),
                 Path::new(&root_dir).join("tests/fixtures/pg-tom_sawyer.txt").to_str().unwrap(),
             ].iter().map(|s| String::from(*s)).collect();
-            // let files = vec![
-            //     Path::new(&root_dir).join("tests/fixtures/short_two.txt").to_str().unwrap(),
-            //     Path::new(&root_dir).join("tests/fixtures/short_one.txt").to_str().unwrap(),
-            // ].iter().map(|s| String::from(*s)).collect();
 
             let state = State::new(2, files);
             let coordinate = Coordinate::new(state);
@@ -122,6 +121,8 @@ mod tests {
 
         /* -------------------WORKER -------------------*/
 
+        let partition_root = Path::new("/tmp/concurrent-mr");
+
         let worker_one = Worker{
             id:"123".to_owned(),
             map_func: { |_key, value| {
@@ -131,10 +132,11 @@ mod tests {
                 values.iter()
                     .map(|v| v.parse::<i32>().unwrap())
                     .fold(0, |accum, item| accum + item)
+                    .to_string()
             }},
             partitions: 2,
             field_split_func: {|c| !c.is_alphabetic() },
-            partition_output_root: Path::new("/tmp/concurrent-mr").to_owned(),
+            partition_output_root: partition_root.to_path_buf(),
             coordinator_address: String::from("http://127.0.0.1:8888"),
         };
 
@@ -149,36 +151,168 @@ mod tests {
                 values.iter()
                     .map(|v| v.parse::<i32>().unwrap())
                     .fold(0, |accum, item| accum + item)
+                    .to_string()
             }},
             partitions: 2,
             field_split_func: {|c| !c.is_alphabetic() },
-            partition_output_root: Path::new("/tmp/concurrent-mr").to_owned(),
+            partition_output_root: partition_root.to_path_buf(),
             coordinator_address: String::from("http://127.0.0.1:8888"),
         };
 
         runtime.block_on(worker_two.work_loop());
 
-
+        let root_dir = std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let expected_path = Path::new(&root_dir).join("tests/fixtures/mr-correct-wc.txt");
         // There should be two reduced output files because there are 2 partitions
-        let dir_path = Path::new("/tmp/concurrent-mr");
-        let result = compare_files(&dir_path);
-        if let Err(e) = clean_up_files(&dir_path) {
-            println!("Failed removing test files from {}. {:?}", dir_path.display(), e);
+        let result = compare_files(expected_path, partition_root, wc_entry_compare);
+        if let Err(e) = clean_up_files(&partition_root) {
+            println!("Failed removing test files from {}. {:?}", partition_root.display(), e);
         }
         result
     }
 
-    fn compare_files(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    #[test]
+    fn test_map_reduce_indexer() -> Result<(), Box<dyn std::error::Error>> {
+        let runtime = Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("mr-integration-test")
+            .thread_stack_size(3 * 1024 * 1024)
+            .enable_all()
+            .build()
+            .unwrap();
+
+        /* -------------------COORDINATOR -------------------*/
+
+        runtime.spawn(async {
+            let root_dir = std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+            let files = vec![
+                Path::new(&root_dir).join("tests/fixtures/pg-being_ernest.txt").to_str().unwrap(),
+                Path::new(&root_dir).join("tests/fixtures/pg-dorian_gray.txt").to_str().unwrap(),
+                Path::new(&root_dir).join("tests/fixtures/pg-frankenstein.txt").to_str().unwrap(),
+                Path::new(&root_dir).join("tests/fixtures/pg-grimm.txt").to_str().unwrap(),
+                Path::new(&root_dir).join("tests/fixtures/pg-huckleberry_finn.txt").to_str().unwrap(),
+                Path::new(&root_dir).join("tests/fixtures/pg-metamorphosis.txt").to_str().unwrap(),
+                Path::new(&root_dir).join("tests/fixtures/pg-sherlock_holmes.txt").to_str().unwrap(),
+                Path::new(&root_dir).join("tests/fixtures/pg-tom_sawyer.txt").to_str().unwrap(),
+            ].iter().map(|s| String::from(*s)).collect();
+
+            let state = State::new(2, files);
+            let coordinate = Coordinate::new(state);
+            // This port needs to be different than the port used in the concurrent test or else client connections in one of the test will fail
+            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 6666);
+
+            Server::builder()
+                .add_service(CoordinatorServer::new(coordinate))
+                .serve(addr)
+                .await;
+        });
+
+        let partition_root = Path::new("/tmp/mr-indexer");
+
+        let worker_one = Worker{
+            id: String::from("indexer-worker"),
+            map_func: { |document, value| {
+                let filename = PathBuf::from(document).file_name().unwrap().to_str().unwrap().to_owned();
+                (value, filename)
+            }},
+            reduce_func: { |key, values| {
+                let mut set = std::collections::HashSet::new();
+                for val in values.into_iter() {
+                    set.insert(val.clone());
+                }
+                let set_values = set.into_iter().collect::<Vec<String>>();
+                let v = set_values.join(",");
+                format!("{} {v}", set_values.len())
+            }},
+            partitions: 2,
+            field_split_func: {|c| !c.is_alphabetic() },
+            partition_output_root: partition_root.to_path_buf(),
+            coordinator_address: String::from("http://127.0.0.1:6666"),
+        };
+
+        runtime.block_on(worker_one.work_loop());
+
         let root_dir = std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
-        let expected_path = File::open(Path::new(&root_dir).join("mr-correct-wc.txt"))?;
-        // let expected_path = File::open(Path::new(&root_dir).join("short-correct.txt"))?;
-        // let got_path = File::open(Path::new(&root_dir).join("mr-correct-wc.txt"))?; // gut check
-        // let got_path = File::open(Path::new(&root_dir).join("erik-reduce.txt"))?;
-        let reduced_output = collect_reduce_files(path)?;
-        compare_mr_files(BufReader::new(expected_path), reduced_output)
+        let expected_path = Path::new(&root_dir).join("tests/fixtures/mr-correct-indexer.txt");
+        let result = compare_files(expected_path, partition_root, indexer_entry_compare);
+        if let Err(e) = clean_up_files(partition_root) {
+            println!("Failed removing test files from {}. {:?}", partition_root.display(), e);
+        }
+        result
     }
 
-    fn clean_up_files(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    fn wc_entry_compare(expected: &String, got: &String) -> bool {
+        expected == got
+    }
+
+    fn indexer_entry_compare(expected: &String, got: &String) -> bool {
+        let exp_parts: Vec<String> = expected.split_whitespace().map(String::from).collect();
+        let got_parts: Vec<String> = got.split_whitespace().map(String::from).collect();
+
+        if got_parts.len() < 2 || got_parts[0] != exp_parts[0] {
+            return false;
+        } else {
+            let mut exp_idx_entries: Vec<String> = exp_parts[1].split(',')
+                .map(|i| i.trim_start_matches("../").to_owned())
+                .collect();
+            let mut got_idx_entries: Vec<String> = got_parts[1].split(',').map(String::from).collect();
+            if exp_idx_entries.len() != got_idx_entries.len() {
+                return false;
+            }
+
+            for item in exp_idx_entries.iter() {
+                if !got_idx_entries.contains(item) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn compare_files<E, P>(expected_path: E, partition_root: P, comp_func: fn(&String, &String) -> bool) -> Result<(), Box<dyn std::error::Error>>
+    where
+        E: AsRef<Path>,
+        P: AsRef<Path>,
+    {
+        let reduced_output_reader = collect_reduce_files(partition_root)?;
+        let expected_file = File::open(expected_path)?;
+
+        let expected_map = read_to_hashmap(BufReader::new(expected_file))?;
+        let got_map = read_to_hashmap(reduced_output_reader)?;
+
+        if expected_map.len() != got_map.len() {
+            return Err(Box::new(FileCmpError{
+                diff: HashMap::new(),
+                message: String::from("expected size not equal to got size"),
+            }));
+        }
+
+        let mut diff = HashMap::new();
+
+        for(k, v) in expected_map.iter() {
+            match got_map.get(k) {
+                Some(got_val) => {
+                    if ! comp_func(v, got_val) {
+                        diff.insert(k.clone(), (v.clone(), got_val.clone()));
+                    }
+                },
+                None => {
+                    diff.insert(k.clone(), (v.clone(), String::new()));
+                },
+            }
+        }
+
+        if diff.len() > 0 {
+            return Err(Box::new(FileCmpError{
+                diff: diff,
+                message: String::from("contents not equal"),
+            }));
+        }
+
+        Ok(())
+    }
+
+    fn clean_up_files<P: AsRef<Path>>(path: P) -> Result<(), Box<dyn std::error::Error>> {
         for file in std::fs::read_dir(path).unwrap() {
             let path = file?.path();
             if path.is_file() {
@@ -192,16 +326,15 @@ mod tests {
         Ok(())
     }
 
-
-    fn collect_reduce_files(dir: &Path) -> Result<impl BufRead, Box<dyn std::error::Error>> {
+    fn collect_reduce_files<P: AsRef<Path>>(dir: P) -> Result<impl BufRead, Box<dyn std::error::Error>> {
         let mut reduce_files = vec![];
         for file in std::fs::read_dir(dir)? {
             let file = file?;
             let path = file.path();
-            println!("Collecting reduce file {}", path.display());
             if path.is_file() {
                 if let Some(file_name) = path.file_name().unwrap().to_str() {
                     if file_name.contains("reduce_output") {
+                        println!("Collecting reduce file {}", path.display());
                         reduce_files.push(path);
                     }
                 }
@@ -215,68 +348,30 @@ mod tests {
             contents_buf.append(&mut tmp_buf);
         }
 
-        // dbg!(&contents_buf);
         Ok(Cursor::new(contents_buf))
     }
 
 
     #[derive(Clone)]
     struct FileCmpError {
-        count_diff: HashMap<String, (String, String)>,
-        expected_remaining: HashMap<String, String>,
-        got_remaining: HashMap<String, String>,
+        diff: HashMap<String, (String, String)>,
+        message: String,
     }
 
     impl std::fmt::Debug for FileCmpError {
         fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            write!(f, "diff {}.\n expected_remaining: {}.\n got_remaining: {}.\n", self.count_diff.len(), self.expected_remaining.len(), self.got_remaining.len())
+            write!(f, "{}\ndiff {}.", self.message, self.diff.len())
         }
     }
 
     impl std::fmt::Display for FileCmpError {
         fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            write!(f, "diff {}.\n expected_remaining: {}.\n got_remaining: {}.\n", self.count_diff.len(), self.expected_remaining.len(), self.got_remaining.len())
+            write!(f, "{}\n diff {}.\n", self.message, self.diff.len())
         }
     }
 
     impl std::error::Error for FileCmpError {}
 
-    fn compare_mr_files(expected_reader: impl BufRead, got_reader: impl BufRead) -> Result<(), Box<dyn std::error::Error>> {
-        let expected_map = read_to_hashmap(expected_reader)?;
-        let got_map = read_to_hashmap(got_reader)?;
-
-        let mut expected_copy = expected_map.clone(); // make a copy of what's expected to remove present keys from,
-        let mut got_copy = got_map.clone();
-
-
-        let mut count_differences_map: HashMap<String, (String, String)> = HashMap::new();
-
-        for (k, v) in got_map.iter() {
-            match expected_map.get(k) {
-                Some(expected_val) => {
-                    if v != expected_val {
-                        // println!("Key {}. expected: {}, got: {}", &k, &expected_val, &v);
-                        count_differences_map.insert(k.clone(), (expected_val.clone(), v.clone()));
-                    } else {
-                        expected_copy.remove(k);
-                        got_copy.remove(k);
-                    }
-                },
-                None => {},
-            }
-        }
-
-        if count_differences_map.len() > 0 ||
-            expected_copy.len() > 0 ||
-            got_copy.len() > 0 {
-                return Err(Box::new(FileCmpError{
-                    count_diff: count_differences_map,
-                    expected_remaining: expected_copy,
-                    got_remaining: got_copy,
-                }));
-            }
-        Ok(())
-    }
 
     fn read_to_hashmap<T: BufRead>(reader: T) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
         let hashmap = reader.lines()
