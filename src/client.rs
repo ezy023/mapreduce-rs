@@ -101,8 +101,8 @@ where
                         _ => panic!("Unexpected work type {}", response.work_type),
                     }
                 },
-                Err(_) => {
-                    // println!("received error {:?}", e)
+                Err(e) => {
+                    println!("received error in get_work response {:?}", e)
                 },
             }
         }
@@ -111,7 +111,6 @@ where
     // The results need to be returned so they can be partitioned and written out
     fn map(&self, filepath: PathBuf) -> Result<HashMap<String, String>, io::Error> {
         // open file, split values, group to map, pass to func
-        // TODO temp hack to fix integration test issue
         let mut file = File::open(&filepath)?;
         let mut contents = String::new();
         file.read_to_string(&mut contents)?;

@@ -254,7 +254,9 @@ impl Coordinator for Coordinate {
                 let files: Vec<(u8, String)> = request.get_ref().files.iter()
                     .map(|(k, v)| (k.parse::<u8>().unwrap(), v.to_owned()))
                     .collect();
-                state.add_mapped_files(files);
+                if let Err(_) = state.add_mapped_files(files) {
+                    return Err(Status::new(Code::Internal, "failed updating state with mapped files"));
+                }
                 state.mark_map_file_done(request.get_ref().original_file.to_owned());
                 return Ok(Response::new(CompleteWorkReply{}));
             },
@@ -262,7 +264,9 @@ impl Coordinator for Coordinate {
                 let (partition, reduce_output_file) = request.get_ref().files.iter().nth(0).unwrap();
                 match partition.parse::<usize>() {
                     Ok(val) => {
-                        state.complete_partition(val, reduce_output_file.to_string());
+                        if let Err(_) = state.complete_partition(val, reduce_output_file.to_string()) {
+                            return Err(Status::new(Code::Internal, "failed completing partition"));
+                        }
                         return Ok(Response::new(CompleteWorkReply{}));
                     },
                     Err(e) => {
